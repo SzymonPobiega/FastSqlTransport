@@ -21,7 +21,6 @@ namespace NServiceBus.Transport.SQLServer
             this.schemaAndCatalogSettings = settings.GetOrCreate<EndpointSchemaAndCatalogSettings>();
 
             //HINT: this flag indicates that user need to explicitly turn outbox in configuration.
-            RequireOutboxConsent = true;
         }
 
         public override IEnumerable<Type> DeliveryConstraints { get; } = new[]
@@ -47,26 +46,15 @@ namespace NServiceBus.Transport.SQLServer
                 waitTimeCircuitBreaker = TimeSpan.FromSeconds(30);
             }
 
-            QueuePeekerOptions queuePeekerOptions;
-            if (!settings.TryGet(out queuePeekerOptions))
-            {
-                queuePeekerOptions = new QueuePeekerOptions();
-            }
-
             var connectionFactory = CreateConnectionFactory();
 
-            Func<TransportTransactionMode, ReceiveStrategy> receiveStrategyFactory =
-                guarantee => SelectReceiveStrategy(guarantee, scopeOptions.TransactionOptions, connectionFactory);
+            Func<TransportTransactionMode, ReceiveWithNativeTransaction> receiveStrategyFactory =
+                guarantee => SelectReceiveStrategy(guarantee, scopeOptions.TransactionOptions);
 
             var queuePurger = new QueuePurger(connectionFactory);
-            var queuePeeker = new QueuePeeker(connectionFactory, queuePeekerOptions);
-
-            var expiredMessagesPurger = CreateExpiredMessagesPurger(connectionFactory);
-
-            Func<string, TableBasedQueue> queueFactory = queueName => new TableBasedQueue(addressTranslator.Parse(queueName).QualifiedTableName, queueName);
 
             return new TransportReceiveInfrastructure(
-                () => new MessagePump(receiveStrategyFactory, queueFactory, queuePurger, expiredMessagesPurger, queuePeeker, waitTimeCircuitBreaker),
+                () => new MessagePump(receiveStrategyFactory, GetQueueFactoryFactory(), queuePurger, connectionFactory, () => new ProgressiveDelayQueueEmptyHandling(100, 5000), addressTranslator, waitTimeCircuitBreaker),
                 () => new QueueCreator(connectionFactory, addressTranslator),
                 () => Task.FromResult(StartupCheckResult.Success));
         }
@@ -83,46 +71,38 @@ namespace NServiceBus.Transport.SQLServer
             return SqlConnectionFactory.Default(connectionString);
         }
 
-        static ReceiveStrategy SelectReceiveStrategy(TransportTransactionMode minimumConsistencyGuarantee, TransactionOptions options, SqlConnectionFactory connectionFactory)
+        static ReceiveWithNativeTransaction SelectReceiveStrategy(TransportTransactionMode minimumConsistencyGuarantee, TransactionOptions options)
         {
             if (minimumConsistencyGuarantee == TransportTransactionMode.TransactionScope)
             {
-                return new ReceiveWithTransactionScope(options, connectionFactory, new FailureInfoStorage(10000));
+                throw new Exception($"Transaction mode {minimumConsistencyGuarantee} is not supported");
             }
 
             if (minimumConsistencyGuarantee == TransportTransactionMode.SendsAtomicWithReceive)
             {
-                return new ReceiveWithNativeTransaction(options, connectionFactory, new FailureInfoStorage(10000));
+                return new ReceiveWithNativeTransaction(options, new FailureInfoStorage(10000));
             }
-
-            if (minimumConsistencyGuarantee == TransportTransactionMode.ReceiveOnly)
-            {
-                return new ReceiveWithNativeTransaction(options, connectionFactory, new FailureInfoStorage(10000), transactionForReceiveOnly: true);
-            }
-
-            return new ReceiveWithNoTransaction(connectionFactory);
-        }
-
-        ExpiredMessagesPurger CreateExpiredMessagesPurger(SqlConnectionFactory connectionFactory)
-        {
-            var purgeTaskDelay = settings.HasSetting(SettingsKeys.PurgeTaskDelayTimeSpanKey) ? settings.Get<TimeSpan?>(SettingsKeys.PurgeTaskDelayTimeSpanKey) : null;
-            var purgeBatchSize = settings.HasSetting(SettingsKeys.PurgeBatchSizeKey) ? settings.Get<int?>(SettingsKeys.PurgeBatchSizeKey) : null;
-
-            return new ExpiredMessagesPurger(_ => connectionFactory.OpenNewConnection(), purgeTaskDelay, purgeBatchSize);
+            return new ReceiveWithNativeTransaction(options, new FailureInfoStorage(10000), transactionForReceiveOnly: true);
         }
 
         public override TransportSendInfrastructure ConfigureSendInfrastructure()
         {
             var connectionFactory = CreateConnectionFactory();
             settings.Get<EndpointInstances>().AddOrReplaceInstances("SqlServer", schemaAndCatalogSettings.ToEndpointInstances());
-            var queueFactory = new TableBasedQueueFactory();
             return new TransportSendInfrastructure(
-                () => new MessageDispatcher(new TableBasedQueueDispatcher(connectionFactory, addressTranslator, queueFactory), addressTranslator),
-                () =>
-                {
-                    var result = UsingV2ConfigurationChecker.Check();
-                    return Task.FromResult(result);
-                });
+                () => new MessageDispatcher(addressTranslator, connectionFactory, GetQueueFactoryFactory()),
+                () => Task.FromResult(StartupCheckResult.Success)
+                );
+        }
+
+        static Func<TableBasedQueueFactory> GetQueueFactoryFactory()
+        {
+            return () => new TableBasedQueueFactory(GetQueueFullHandling());
+        }
+
+        static ProgressiveDelayQueueFullHandling GetQueueFullHandling()
+        {
+            return new ProgressiveDelayQueueFullHandling(5, 50);
         }
 
         public override TransportSubscriptionInfrastructure ConfigureSubscriptionInfrastructure()

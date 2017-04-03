@@ -5,45 +5,49 @@
     using System.Threading;
     using System.Threading.Tasks;
     using System.Transactions;
+    using Extensibility;
     using IsolationLevel = System.Data.IsolationLevel;
 
-    class ReceiveWithNativeTransaction : ReceiveStrategy
+    class ReceiveWithNativeTransaction
     {
-        public ReceiveWithNativeTransaction(TransactionOptions transactionOptions, SqlConnectionFactory connectionFactory, FailureInfoStorage failureInfoStorage, bool transactionForReceiveOnly = false)
+        public ReceiveWithNativeTransaction(TransactionOptions transactionOptions, FailureInfoStorage failureInfoStorage, bool transactionForReceiveOnly = false)
         {
-            this.connectionFactory = connectionFactory;
             this.failureInfoStorage = failureInfoStorage;
             this.transactionForReceiveOnly = transactionForReceiveOnly;
 
             isolationLevel = IsolationLevelMapper.Map(transactionOptions.IsolationLevel);
         }
 
-        public override async Task ReceiveMessage(CancellationTokenSource receiveCancellationTokenSource)
+        
+        public async Task ReceiveMessage(TableBasedQueue inputQueue, TableBasedQueue poisonQueue, TableBasedQueueFactory queueFactory, SqlConnection connection, CancellationTokenSource receiveCancellationTokenSource)
         {
             Message message = null;
             try
             {
-                using (var connection = await connectionFactory.OpenNewConnection().ConfigureAwait(false))
                 using (var transaction = connection.BeginTransaction(isolationLevel))
                 {
-                    message = await TryReceive(connection, transaction, receiveCancellationTokenSource).ConfigureAwait(false);
+                    var receiveResult = await inputQueue.TryReceive(connection, transaction).ConfigureAwait(false);
 
-                    if (message == null)
+                    if (receiveResult.IsPoison)
                     {
-                        // The message was received but is not fit for processing (e.g. was DLQd).
-                        // In such a case we still need to commit the transport tx to remove message
-                        // from the queue table.
+                        await poisonQueue.DeadLetter(receiveResult.RawData, connection, transaction).ConfigureAwait(false);
                         transaction.Commit();
                         return;
                     }
-
-                    if (!await TryProcess(message, PrepareTransportTransaction(connection, transaction)).ConfigureAwait(false))
+                    if (!receiveResult.Successful)
                     {
-                        transaction.Rollback();
+                        receiveCancellationTokenSource.Cancel();
                         return;
                     }
-
-                    transaction.Commit();
+                    message = receiveResult.Message;
+                    if (!await TryProcess(message, PrepareTransportTransaction(connection, transaction, queueFactory)).ConfigureAwait(false))
+                    {
+                        transaction.Rollback();
+                    }
+                    else
+                    {
+                        transaction.Commit();
+                    }
                 }
 
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
@@ -58,13 +62,14 @@
             }
         }
 
-        TransportTransaction PrepareTransportTransaction(SqlConnection connection, SqlTransaction transaction)
+        TransportTransaction PrepareTransportTransaction(SqlConnection connection, SqlTransaction transaction, TableBasedQueueFactory queueFactory)
         {
             var transportTransaction = new TransportTransaction();
 
             //those resources are meant to be used by anyone except message dispatcher e.g. persister
             transportTransaction.Set(connection);
             transportTransaction.Set(transaction);
+            transportTransaction.Set(queueFactory);
 
             if (transactionForReceiveOnly)
             {
@@ -99,10 +104,51 @@
             }
         }
 
+        async Task<bool> TryProcessingMessage(Message message, TransportTransaction transportTransaction)
+        {
+            using (var pushCancellationTokenSource = new CancellationTokenSource())
+            {
+                var messageContext = new MessageContext(message.TransportId, message.Headers, message.Body, transportTransaction, pushCancellationTokenSource, new ContextBag());
+
+                await onMessage(messageContext).ConfigureAwait(false);
+
+                // Cancellation is requested when message processing is aborted.
+                // We return the opposite value:
+                //  - true when message processing completed successfully,
+                //  - false when message processing was aborted.
+                return !pushCancellationTokenSource.Token.IsCancellationRequested;
+            }
+        }
+
+        async Task<ErrorHandleResult> HandleError(Exception exception, Message message, TransportTransaction transportTransaction, int processingAttempts)
+        {
+            try
+            {
+                var errorContext = new ErrorContext(exception, message.Headers, message.TransportId, message.Body, transportTransaction, processingAttempts);
+
+                return await onError(errorContext).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                criticalError.Raise($"Failed to execute reverability actions for message `{message.TransportId}`", ex);
+
+                return ErrorHandleResult.RetryRequired;
+            }
+        }
+
         IsolationLevel isolationLevel;
-        SqlConnectionFactory connectionFactory;
         FailureInfoStorage failureInfoStorage;
         bool transactionForReceiveOnly;
         internal static string ReceiveOnlyTransactionMode = "SqlTransport.ReceiveOnlyTransactionMode";
+        Func<MessageContext, Task> onMessage;
+        Func<ErrorContext, Task<ErrorHandleResult>> onError;
+        CriticalError criticalError;
+
+        public void Init(Func<MessageContext, Task> onMessage, Func<ErrorContext, Task<ErrorHandleResult>> onError, CriticalError criticalError)
+        {
+            this.onMessage = onMessage;
+            this.onError = onError;
+            this.criticalError = criticalError;
+        }
     }
 }

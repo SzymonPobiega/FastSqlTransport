@@ -11,6 +11,8 @@
 
     class MessageRow
     {
+        public int Seq { get; private set; }
+
         MessageRow() { }
 
         public static async Task<MessageReadResult> Read(SqlDataReader dataReader)
@@ -19,36 +21,28 @@
             return row.TryParse();
         }
 
-        public static MessageRow From(Dictionary<string, string> headers, byte[] body)
+        public static MessageRow From(string messageId, Dictionary<string, string> headers, byte[] body, int currentSeq)
         {
             return new MessageRow
             {
-                id = Guid.NewGuid(),
-                correlationId = TryGetHeaderValue(headers, Headers.CorrelationId, s => s),
-                replyToAddress = TryGetHeaderValue(headers, Headers.ReplyToAddress, s => s),
-                recoverable = true,
-                timeToBeReceived = TryGetHeaderValue(headers, Headers.TimeToBeReceived, s =>
-                {
-                    TimeSpan timeToBeReceived;
-                    return TimeSpan.TryParse(s, out timeToBeReceived)
-                        ? (int?) timeToBeReceived.TotalMilliseconds
-                        : null;
-                }),
+                Seq = currentSeq,
+                id = messageId,
                 headers = DictionarySerializer.Serialize(headers),
                 bodyBytes = body
             };
         }
 
+        public void UpdateSeq(int newSeq)
+        {
+            Seq = newSeq;
+        }
 
         public void PrepareSendCommand(SqlCommand command)
         {
-            AddParameter(command, "Id", SqlDbType.UniqueIdentifier, id);
-            AddParameter(command, "CorrelationId", SqlDbType.VarChar, correlationId);
-            AddParameter(command, "ReplyToAddress", SqlDbType.VarChar, replyToAddress);
-            AddParameter(command, "Recoverable", SqlDbType.Bit, recoverable);
-            AddParameter(command, "TimeToBeReceivedMs", SqlDbType.Int, timeToBeReceived);
-            AddParameter(command, "Headers", SqlDbType.VarChar, headers);
-            AddParameter(command, "Body", SqlDbType.VarBinary, bodyBytes);
+            AddParameter(command, "seq", SqlDbType.Int, Seq);
+            AddParameter(command, "id", SqlDbType.VarChar, id);
+            AddParameter(command, "headers", SqlDbType.VarChar, headers);
+            AddParameter(command, "body", SqlDbType.VarBinary, bodyBytes);
         }
 
         static async Task<MessageRow> ReadRow(SqlDataReader dataReader)
@@ -56,12 +50,10 @@
             //HINT: we are assuming that dataReader is sequential. Order or reads is important !
             return new MessageRow
             {
-                id = await dataReader.GetFieldValueAsync<Guid>(0).ConfigureAwait(false),
-                correlationId = await GetNullableAsync<string>(dataReader, 1).ConfigureAwait(false),
-                replyToAddress = await GetNullableAsync<string>(dataReader, 2).ConfigureAwait(false),
-                recoverable = await dataReader.GetFieldValueAsync<bool>(3).ConfigureAwait(false),
-                headers = await GetHeaders(dataReader, 4).ConfigureAwait(false),
-                bodyBytes = await GetBody(dataReader, 5).ConfigureAwait(false)
+                Seq = await dataReader.GetFieldValueAsync<int>(0).ConfigureAwait(false),
+                id = await dataReader.GetFieldValueAsync<string>(1).ConfigureAwait(false),
+                headers = await GetHeaders(dataReader, 2).ConfigureAwait(false),
+                bodyBytes = await GetBody(dataReader, 3).ConfigureAwait(false)
             };
         }
 
@@ -73,14 +65,7 @@
                     ? new Dictionary<string, string>()
                     : DictionarySerializer.DeSerialize(headers);
 
-                if (!IsNullOrEmpty(replyToAddress))
-                {
-                    parsedHeaders[Headers.ReplyToAddress] = replyToAddress;
-                }
-
-                LegacyCallbacks.SubstituteReplyToWithCallbackQueueIfExists(parsedHeaders);
-
-                return MessageReadResult.Success(new Message(id.ToString(), parsedHeaders, bodyBytes));
+                return MessageReadResult.Success(this, new Message(id, parsedHeaders, bodyBytes));
             }
             catch (Exception ex)
             {
@@ -88,17 +73,7 @@
                 return MessageReadResult.Poison(this);
             }
         }
-
-        static T TryGetHeaderValue<T>(Dictionary<string, string> headers, string name, Func<string, T> conversion)
-        {
-            string text;
-            if (!headers.TryGetValue(name, out text))
-            {
-                return default(T);
-            }
-            return conversion(text);
-        }
-
+        
         static async Task<string> GetHeaders(SqlDataReader dataReader, int headersIndex)
         {
             if (await dataReader.IsDBNullAsync(headersIndex).ConfigureAwait(false))
@@ -123,26 +98,12 @@
             }
         }
 
-        static async Task<T> GetNullableAsync<T>(SqlDataReader dataReader, int index) where T : class
-        {
-            if (await dataReader.IsDBNullAsync(index).ConfigureAwait(false))
-            {
-                return default(T);
-            }
-
-            return await dataReader.GetFieldValueAsync<T>(index).ConfigureAwait(false);
-        }
-
-        void AddParameter(SqlCommand command, string name, SqlDbType type, object value)
+        static void AddParameter(SqlCommand command, string name, SqlDbType type, object value)
         {
             command.Parameters.Add(name, type).Value = value ?? DBNull.Value;
         }
 
-        Guid id;
-        string correlationId;
-        string replyToAddress;
-        bool recoverable;
-        int? timeToBeReceived;
+        string id;
         string headers;
         byte[] bodyBytes;
 

@@ -3,7 +3,6 @@
     using System;
     using System.Data.SqlClient;
     using System.Threading.Tasks;
-    using System.Transactions;
     using Configuration.AdvanceExtensibility;
 
     /// <summary>
@@ -137,51 +136,6 @@
             Guard.AgainstNull(nameof(sqlConnectionFactory), sqlConnectionFactory);
 
             transportExtensions.GetSettings().Set(SettingsKeys.ConnectionFactoryOverride, sqlConnectionFactory);
-
-            return transportExtensions;
-        }
-
-        /// <summary>
-        /// Allows the IsolationLevel and transaction timeout to be changed for the TransactionScope used to receive messages.
-        /// </summary>
-        /// <remarks>
-        /// If not specified the default transaction timeout of the machine will be used and the isolation level will be set to
-        /// `ReadCommited`.
-        /// </remarks>
-        public static TransportExtensions<SqlServerTransport> TransactionScopeOptions(this TransportExtensions<SqlServerTransport> transportExtensions, TimeSpan? timeout = null, IsolationLevel? isolationLevel = null)
-        {
-            Guard.AgainstNull(nameof(transportExtensions), transportExtensions);
-
-            transportExtensions.GetSettings().Set<SqlScopeOptions>(new SqlScopeOptions(timeout, isolationLevel));
-            return transportExtensions;
-        }
-
-        /// <summary>
-        /// Allows changing the queue peek delay.
-        /// </summary>
-        /// <param name="transportExtensions">The <see cref="TransportExtensions{T}" /> to extend.</param>
-        /// <param name="delay">The delay value</param>
-        /// <returns></returns>
-        public static TransportExtensions<SqlServerTransport> WithPeekDelay(this TransportExtensions<SqlServerTransport> transportExtensions, TimeSpan? delay = null)
-        {
-            Guard.AgainstNull(nameof(transportExtensions), transportExtensions);
-
-            transportExtensions.GetSettings().Set<QueuePeekerOptions>(new QueuePeekerOptions(delay));
-            return transportExtensions;
-        }
-
-        /// <summary>
-        /// Enables multi-instance mode.
-        /// </summary>
-        /// <param name="transportExtensions">The <see cref="TransportExtensions{T}" /> to extend.</param>
-        /// <param name="sqlConnectionFactory">Function that returns opened sql connection based on destination queue name.</param>
-        [ObsoleteEx(RemoveInVersion = "4.0", TreatAsErrorFromVersion = "4.0", Message = "Multi-instance mode has been deprecated and is no longer a recommended model of deployment. Please refer to documentation for more details.")]
-        public static TransportExtensions<SqlServerTransport> EnableLegacyMultiInstanceMode(this TransportExtensions<SqlServerTransport> transportExtensions, Func<string, Task<SqlConnection>> sqlConnectionFactory)
-        {
-            Guard.AgainstNull(nameof(transportExtensions), transportExtensions);
-            Guard.AgainstNull(nameof(sqlConnectionFactory), sqlConnectionFactory);
-
-            transportExtensions.GetSettings().Set(SettingsKeys.LegacyMultiInstanceConnectionFactory, sqlConnectionFactory);
 
             return transportExtensions;
         }

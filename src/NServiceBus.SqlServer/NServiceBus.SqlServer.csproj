@@ -56,7 +56,7 @@
     </Reference>
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="NServiceBus.Core, Version=6.0.0.0, Culture=neutral, PublicKeyToken=9fc386479f8a226c, processorArchitecture=MSIL">
-      <HintPath>..\packages\NServiceBus.6.0.0\lib\net452\NServiceBus.Core.dll</HintPath>
+      <HintPath>..\packages\NServiceBus.6.2.0\lib\net452\NServiceBus.Core.dll</HintPath>
       <Private>True</Private>
     </Reference>
     <Reference Include="Obsolete, Version=4.1.0.0, Culture=neutral, PublicKeyToken=1ca091877d12ca03, processorArchitecture=MSIL">
@@ -85,31 +85,18 @@
     <Compile Include="Configuration\ValidationCheckResult.cs" />
     <Compile Include="Guard.cs" />
     <Compile Include="InternalsVisibleTo.cs" />
-    <Compile Include="Legacy\LegacyCallbacks.cs" />
+    <Compile Include="Queuing\IQueueEmptyHandling.cs" />
+    <Compile Include="Queuing\IQueueFullHandling.cs" />
+    <Compile Include="Queuing\MessageWriteResult.cs" />
+    <Compile Include="Queuing\ProgressiveDelayQueueEmptyHandling.cs" />
+    <Compile Include="Queuing\ProgressiveDelayQueueFullHandling.cs" />
     <Compile Include="Queuing\TableBasedQueueFactory.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyMessageDispatcher.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyQueueAddressTranslator.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacySql.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyCanonicalQueueAddress.cs" />
-    <Compile Include="Receiving\QueuePeekerOptions.cs" />
-    <Compile Include="Sending\IQueueDispatcher.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyQueueCreator.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyQueuePeeker.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyQueuePurger.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyReceiveWithTransactionScope.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacySqlConnectionFactory.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacySqlServerTransportInfrastructure.cs" />
-    <Compile Include="Legacy\MultiInstance\LegacyTableBasedQueueDispatcher.cs" />
     <Compile Include="obsoletes.cs" />
     <Compile Include="Queuing\DictionarySerializer.cs" />
-    <Compile Include="Receiving\ExpiredMessagesPurger.cs" />
-    <Compile Include="Receiving\IPeekMessagesInQueue.cs" />
     <Compile Include="Receiving\IPurgeQueues.cs" />
     <Compile Include="Receiving\IsolationLevelMapper.cs" />
-    <Compile Include="Receiving\QueuePeeker.cs" />
     <Compile Include="Receiving\QueuePurger.cs" />
     <Compile Include="Receiving\RepeatedFailuresOvertimeCurcuitBreaker.cs" />
-    <Compile Include="Receiving\ReceiveWithTransactionScope.cs" />
     <Compile Include="Queuing\SqlConstants.cs" />
     <Compile Include="Queuing\Message.cs" />
     <Compile Include="Queuing\MessageRow.cs" />
@@ -118,18 +105,15 @@
     <Compile Include="Resharper.Annotations.g.cs" />
     <Compile Include="Sending\MessageDispatcher.cs" />
     <Compile Include="Configuration\SqlScopeOptions.cs" />
-    <Compile Include="Sending\TableBasedQueueDispatcher.cs" />
+    <Compile Include="SendOptionsExtensions.cs" />
     <Compile Include="SqlServerTransport.cs" />
     <Compile Include="Receiving\MessagePump.cs" />
     <Compile Include="Queuing\MessageReadResult.cs" />
     <Compile Include="Receiving\ReceiveWithNativeTransaction.cs" />
-    <Compile Include="Receiving\ReceiveWithNoTransaction.cs" />
-    <Compile Include="Receiving\ReceiveStrategy.cs" />
     <Compile Include="Receiving\QueueCreator.cs" />
     <Compile Include="SqlServerTransportInfrastructure.cs" />
     <Compile Include="SqlServerTransportSettingsExtensions.cs" />
     <Compile Include="Queuing\TableBasedQueue.cs" />
-    <Compile Include="Sending\UsingV2ConfigurationChecker.cs" />
     <Compile Include="TaskEx.cs" />
     <Compile Include="Receiving\FailureInfoStorage.cs" />
   </ItemGroup>

@@ -1,7 +1,6 @@
 ﻿namespace NServiceBus.Transport.SQLServer
 {
     using System;
-    using System.Collections.Concurrent;
     using System.Data.SqlClient;
     using System.Linq;
     using System.Threading;
@@ -10,13 +9,14 @@
 
     class MessagePump : IPushMessages
     {
-        public MessagePump(Func<TransportTransactionMode, ReceiveStrategy> receiveStrategyFactory, Func<string, TableBasedQueue> queueFactory, IPurgeQueues queuePurger, ExpiredMessagesPurger expiredMessagesPurger, IPeekMessagesInQueue queuePeeker, TimeSpan waitTimeCircuitBreaker)
+        public MessagePump(Func<TransportTransactionMode, ReceiveWithNativeTransaction> receiveStrategyFactory, Func<TableBasedQueueFactory> queueFactoryFactory, IPurgeQueues queuePurger, SqlConnectionFactory connectionFactory, Func<IQueueEmptyHandling> queueEmptyHandlingFactory, QueueAddressTranslator addressTranslator, TimeSpan waitTimeCircuitBreaker)
         {
             this.receiveStrategyFactory = receiveStrategyFactory;
+            this.queueFactoryFactory = queueFactoryFactory;
             this.queuePurger = queuePurger;
-            this.queueFactory = queueFactory;
-            this.expiredMessagesPurger = expiredMessagesPurger;
-            this.queuePeeker = queuePeeker;
+            this.connectionFactory = connectionFactory;
+            this.queueEmptyHandlingFactory = queueEmptyHandlingFactory;
+            this.addressTranslator = addressTranslator;
             this.waitTimeCircuitBreaker = waitTimeCircuitBreaker;
         }
 
@@ -24,18 +24,19 @@
         {
             receiveStrategy = receiveStrategyFactory(settings.RequiredTransactionMode);
 
-            peekCircuitBreaker = new RepeatedFailuresOverTimeCircuitBreaker("SqlPeek", waitTimeCircuitBreaker, ex => criticalError.Raise("Failed to peek " + settings.InputQueue, ex));
-            receiveCircuitBreaker = new RepeatedFailuresOverTimeCircuitBreaker("ReceiveText", waitTimeCircuitBreaker, ex => criticalError.Raise("Failed to receive from " + settings.InputQueue, ex));
+            receiveCircuitBreaker = new RepeatedFailuresOverTimeCircuitBreaker("Receive", waitTimeCircuitBreaker, ex => criticalError.Raise("Failed to receive from " + settings.InputQueue, ex));
+            loopCircuitBreaker = new RepeatedFailuresOverTimeCircuitBreaker("Receive Loop", waitTimeCircuitBreaker, ex => criticalError.Raise("Failed to run receive loop for " + settings.InputQueue, ex));
 
-            inputQueue = queueFactory(settings.InputQueue);
-            errorQueue = queueFactory(settings.ErrorQueue);
+            receiveStrategy.Init(onMessage, onError, criticalError);
 
-            receiveStrategy.Init(inputQueue, errorQueue, onMessage, onError, criticalError);
+            inputQueueName = settings.InputQueue;
+            errorQueueName = settings.ErrorQueue;
 
             if (settings.PurgeOnStartup)
             {
                 try
                 {
+                    var inputQueue = GetQueue(settings.InputQueue, queueFactoryFactory());
                     var purgedRowsCount = await queuePurger.Purge(inputQueue).ConfigureAwait(false);
 
                     Logger.InfoFormat("{0:N} messages purged from queue {1}", purgedRowsCount, settings.InputQueue);
@@ -45,122 +46,96 @@
                     Logger.Warn("Failed to purge input queue on startup.", ex);
                 }
             }
+        }
 
-            await expiredMessagesPurger.Initialize(inputQueue).ConfigureAwait(false);
+        TableBasedQueue GetQueue(string address, TableBasedQueueFactory factory)
+        {
+            return factory.Get(addressTranslator.Parse(address).QualifiedTableName, address);
         }
 
         public void Start(PushRuntimeSettings limitations)
         {
-            runningReceiveTasks = new ConcurrentDictionary<Task, Task>();
-            concurrencyLimiter = new SemaphoreSlim(limitations.MaxConcurrency);
-            cancellationTokenSource = new CancellationTokenSource();
+            mainCancellationTokenSource = new CancellationTokenSource();
 
-            cancellationToken = cancellationTokenSource.Token;
-
-            messagePumpTask = Task.Run(ProcessMessages, CancellationToken.None);
-            purgeTask = Task.Run(PurgeExpiredMessages, CancellationToken.None);
+            receiveTasks = Enumerable.Range(0, limitations.MaxConcurrency)
+                .Select(i => Task.Run(() => ProcessMessages(mainCancellationTokenSource.Token), CancellationToken.None))
+                .ToArray();
         }
 
         public async Task Stop()
         {
             const int timeoutDurationInSeconds = 30;
-            cancellationTokenSource.Cancel();
+            mainCancellationTokenSource.Cancel();
 
             // ReSharper disable once MethodSupportsCancellation
             var timeoutTask = Task.Delay(TimeSpan.FromSeconds(timeoutDurationInSeconds));
-            var allTasks = runningReceiveTasks.Values.Concat(new[]
-            {
-                messagePumpTask,
-                purgeTask
-            });
-            var finishedTask = await Task.WhenAny(Task.WhenAll(allTasks), timeoutTask).ConfigureAwait(false);
-
+            var finishedTask = await Task.WhenAny(Task.WhenAll(receiveTasks), timeoutTask).ConfigureAwait(false);
             if (finishedTask.Equals(timeoutTask))
             {
-                Logger.ErrorFormat("The message pump failed to stop within the time allowed ({0}s)", timeoutDurationInSeconds);
+                Logger.ErrorFormat($"The message pump failed to stop within the time allowed ({timeoutDurationInSeconds} s)");
             }
-
-            concurrencyLimiter.Dispose();
-            cancellationTokenSource.Dispose();
-
-            runningReceiveTasks.Clear();
+            mainCancellationTokenSource.Dispose();
+            receiveTasks = null;
         }
 
-        async Task ProcessMessages()
+        async Task ProcessMessages(CancellationToken stopToken)
         {
-            while (!cancellationToken.IsCancellationRequested)
+            while (!stopToken.IsCancellationRequested)
             {
                 try
                 {
-                    await InnerProcessMessages().ConfigureAwait(false);
+                    var factory = queueFactoryFactory();
+
+                    var inputQueue = GetQueue(inputQueueName, factory);
+                    var errorQueue = GetQueue(errorQueueName, factory); 
+
+                    await InnerProcessMessages(stopToken, queueEmptyHandlingFactory(), factory, inputQueue, errorQueue).ConfigureAwait(false);
+                    loopCircuitBreaker.Success();
                 }
                 catch (OperationCanceledException)
                 {
                     // For graceful shutdown purposes
                 }
-                catch (SqlException e) when (cancellationToken.IsCancellationRequested)
+                catch (SqlException e) when (stopToken.IsCancellationRequested)
                 {
                     Logger.Debug("Exception thrown during cancellation", e);
                 }
                 catch (Exception ex)
                 {
                     Logger.Error("Sql Message pump failed", ex);
-                    await peekCircuitBreaker.Failure(ex).ConfigureAwait(false);
+                    await loopCircuitBreaker.Failure(ex).ConfigureAwait(false);
                 }
             }
         }
 
-        async Task InnerProcessMessages()
+        async Task InnerProcessMessages(CancellationToken stopToken, IQueueEmptyHandling queueEmptyHandling, TableBasedQueueFactory queueFactory, TableBasedQueue inputQueue, TableBasedQueue errorQueue)
         {
-            while (!cancellationTokenSource.IsCancellationRequested)
+            while (!stopToken.IsCancellationRequested)
             {
-                var messageCount = await queuePeeker.Peek(inputQueue, peekCircuitBreaker, cancellationToken).ConfigureAwait(false);
-
-                if (messageCount == 0)
-                {
-                    continue;
-                }
-
-                if (cancellationTokenSource.IsCancellationRequested)
-                {
-                    return;
-                }
-
                 // We cannot dispose this token source because of potential race conditions of concurrent receives
                 var loopCancellationTokenSource = new CancellationTokenSource();
 
-                for (var i = 0; i < messageCount; i++)
+                using (var connection = await connectionFactory.OpenNewConnection().ConfigureAwait(false))
                 {
-                    if (loopCancellationTokenSource.Token.IsCancellationRequested)
+                    while (true)
                     {
-                        break;
+                        await InnerReceive(connection, loopCancellationTokenSource, queueFactory, inputQueue, errorQueue).ConfigureAwait(false);
+                        if (loopCancellationTokenSource.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        queueEmptyHandling.OnQueueNonEmpty();
                     }
-
-                    await concurrencyLimiter.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-                    var receiveTask = InnerReceive(loopCancellationTokenSource);
-                    runningReceiveTasks.TryAdd(receiveTask, receiveTask);
-
-                    receiveTask.ContinueWith((t, state) =>
-                    {
-                        var receiveTasks = (ConcurrentDictionary<Task, Task>) state;
-                        Task toBeRemoved;
-                        receiveTasks.TryRemove(t, out toBeRemoved);
-                    }, runningReceiveTasks, TaskContinuationOptions.ExecuteSynchronously)
-                    .Ignore();
                 }
+                await queueEmptyHandling.HandleQueueEmpty(stopToken).ConfigureAwait(false);
             }
         }
 
-        async Task InnerReceive(CancellationTokenSource loopCancellationTokenSource)
+        async Task InnerReceive(SqlConnection connection, CancellationTokenSource loopCancellationTokenSource, TableBasedQueueFactory queueFactory, TableBasedQueue inputQueue, TableBasedQueue errorQueue)
         {
             try
             {
-                // We need to force the method to continue asynchronously because SqlConnection
-                // in combination with TransactionScope will apply connection pooling and enlistment synchronous in ctor.
-                await Task.Yield();
-
-                await receiveStrategy.ReceiveMessage(loopCancellationTokenSource)
+                await receiveStrategy.ReceiveMessage(inputQueue, errorQueue, queueFactory, connection, loopCancellationTokenSource)
                     .ConfigureAwait(false);
 
                 receiveCircuitBreaker.Success();
@@ -176,60 +151,22 @@
 
                 await receiveCircuitBreaker.Failure(ex).ConfigureAwait(false);
             }
-            finally
-            {
-                concurrencyLimiter.Release();
-            }
         }
 
-        async Task PurgeExpiredMessages()
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                try
-                {
-                    await expiredMessagesPurger.Purge(inputQueue, cancellationToken).ConfigureAwait(false);
-
-                    Logger.DebugFormat("Scheduling next expired message purge task for queue {0} in {1}", inputQueue, expiredMessagesPurger.PurgeTaskDelay);
-                    await Task.Delay(expiredMessagesPurger.PurgeTaskDelay, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Graceful shutdown
-                }
-                catch (SqlException e) when (e.Number == 1205)
-                {
-                    //Purge has been victim of a lock resolution
-                    Logger.Warn("Purger has been selected as a lock victim.", e);
-                }
-                catch (SqlException e) when (cancellationToken.IsCancellationRequested)
-                {
-                    Logger.Debug("Exception thown while performing cancellation", e);
-                }
-                catch (Exception e)
-                {
-                    Logger.WarnFormat("Purging expired messages from table {0} failed with exception: {1}.", inputQueue, e);
-                }
-            }
-        }
-
-        TableBasedQueue inputQueue;
-        TableBasedQueue errorQueue;
-        Func<TransportTransactionMode, ReceiveStrategy> receiveStrategyFactory;
+        Task[] receiveTasks;
+        Func<TransportTransactionMode, ReceiveWithNativeTransaction> receiveStrategyFactory;
+        readonly Func<TableBasedQueueFactory> queueFactoryFactory;
         IPurgeQueues queuePurger;
-        Func<string, TableBasedQueue> queueFactory;
-        ExpiredMessagesPurger expiredMessagesPurger;
-        IPeekMessagesInQueue queuePeeker;
+        SqlConnectionFactory connectionFactory;
+        Func<IQueueEmptyHandling> queueEmptyHandlingFactory;
+        QueueAddressTranslator addressTranslator;
         TimeSpan waitTimeCircuitBreaker;
-        ConcurrentDictionary<Task, Task> runningReceiveTasks;
-        SemaphoreSlim concurrencyLimiter;
-        CancellationTokenSource cancellationTokenSource;
-        CancellationToken cancellationToken;
-        RepeatedFailuresOverTimeCircuitBreaker peekCircuitBreaker;
+        CancellationTokenSource mainCancellationTokenSource;
         RepeatedFailuresOverTimeCircuitBreaker receiveCircuitBreaker;
-        Task messagePumpTask;
-        Task purgeTask;
-        ReceiveStrategy receiveStrategy;
+        RepeatedFailuresOverTimeCircuitBreaker loopCircuitBreaker;
+        ReceiveWithNativeTransaction receiveStrategy;
+        string inputQueueName;
+        string errorQueueName;
 
         static ILog Logger = LogManager.GetLogger<MessagePump>();
     }

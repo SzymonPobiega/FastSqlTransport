@@ -24,18 +24,6 @@ namespace NServiceBus
         /// </summary>
         public override bool RequiresConnectionString => false;
 
-        static bool LegacyMultiInstanceModeTurnedOn(SettingsHolder settings)
-        {
-            Func<string, Task<SqlConnection>> legacyModeTurnedOn;
-
-            var legacyMode = settings.TryGet(SettingsKeys.LegacyMultiInstanceConnectionFactory, out legacyModeTurnedOn);
-            if (legacyMode && settings.HasSetting(SettingsKeys.MultiCatalogEnabled))
-            {
-                throw new Exception("Multi-catalog configuration is not supported in legacy multi instance mode. Please configure each catalog using a separate connection string.");
-            }
-            return legacyMode;
-        }
-
         /// <summary>
         /// <see cref="TransportDefinition.Initialize" />
         /// </summary>
@@ -45,17 +33,9 @@ namespace NServiceBus
             settings.TryGet(SettingsKeys.DefaultSchemaSettingsKey, out defaultSchemaOverride);
             var queueSchemaSettings = settings.GetOrDefault<QueueSchemaAndCatalogSettings>();
 
-            if (LegacyMultiInstanceModeTurnedOn(settings))
-            {
-                var addressParser = new LegacyQueueAddressTranslator("dbo", defaultSchemaOverride, queueSchemaSettings);
-                return new LegacySqlServerTransportInfrastructure(addressParser, settings);
-            }
-            else
-            {
-                var catalog = GetDefaultCatalog(settings, connectionString);
-                var addressParser = new QueueAddressTranslator(catalog, "dbo", defaultSchemaOverride, queueSchemaSettings);
-                return new SqlServerTransportInfrastructure(addressParser, settings, connectionString);
-            }
+            var catalog = GetDefaultCatalog(settings, connectionString);
+            var addressParser = new QueueAddressTranslator(catalog, "dbo", defaultSchemaOverride, queueSchemaSettings);
+            return new SqlServerTransportInfrastructure(addressParser, settings, connectionString);
         }
 
         static string GetDefaultCatalog(SettingsHolder settings, string connectionString)

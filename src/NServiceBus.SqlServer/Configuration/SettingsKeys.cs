@@ -6,7 +6,6 @@
         public const string ConnectionFactoryOverride = "SqlServer.ConnectionFactoryOverride";
         public const string TimeToWaitBeforeTriggering = "SqlServer.CircuitBreaker.TimeToWaitBeforeTriggering";
 
-        public const string LegacyMultiInstanceConnectionFactory = "SqlServer.LegacyMultiInstanceConnectionFactory";
         public const string MultiCatalogEnabled = "SqlServer.MultiCatalogEnabled";
 
         public const string PurgeTaskDelayTimeSpanKey = "SqlServer.PurgeTaskDelayTimeSpan";

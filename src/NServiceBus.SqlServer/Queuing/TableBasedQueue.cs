@@ -4,7 +4,6 @@ namespace NServiceBus.Transport.SQLServer
     using System.Collections.Generic;
     using System.Data;
     using System.Data.SqlClient;
-    using System.Threading;
     using System.Threading.Tasks;
     using Logging;
     using Unicast.Queuing;
@@ -14,37 +13,62 @@ namespace NServiceBus.Transport.SQLServer
     {
         public string Name { get; }
 
-        public TableBasedQueue(string qualifiedTableName, string queueName)
+        public TableBasedQueue(string qualifiedTableName, string queueName, IQueueFullHandling queueFullHandling)
         {
 #pragma warning disable 618
             this.qualifiedTableName = qualifiedTableName;
+            this.queueFullHandling = queueFullHandling;
             Name = queueName;
-            peekCommand = Format(SqlConstants.PeekText, this.qualifiedTableName);
             receiveCommand = Format(SqlConstants.ReceiveText, this.qualifiedTableName);
             sendCommand = Format(SqlConstants.SendText, this.qualifiedTableName);
             purgeCommand = Format(SqlConstants.PurgeText, this.qualifiedTableName);
-            purgeExpiredCommand = Format(SqlConstants.PurgeBatchOfExpiredMessagesText, this.qualifiedTableName);
-            checkIndexCommand = Format(SqlConstants.CheckIfExpiresIndexIsPresent, this.qualifiedTableName);
 #pragma warning restore 618
         }
 
-        public virtual async Task<int> TryPeek(SqlConnection connection, CancellationToken token, int timeoutInSeconds = 30)
-        {
-            using (var command = new SqlCommand(peekCommand, connection)
-            {
-                CommandTimeout = timeoutInSeconds
-            })
-            {
-                var numberOfMessages = (int) await command.ExecuteScalarAsync(token).ConfigureAwait(false);
-                return numberOfMessages;
-            }
-        }
-
-        public virtual async Task<MessageReadResult> TryReceive(SqlConnection connection, SqlTransaction transaction)
+        public async Task<MessageReadResult> TryReceive(SqlConnection connection, SqlTransaction transaction)
         {
             using (var command = new SqlCommand(receiveCommand, connection, transaction))
             {
-                return await ReadMessage(command).ConfigureAwait(false);
+                command.Parameters.AddWithValue("@seq", receivedSeq);
+                using (var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow | CommandBehavior.SequentialAccess).ConfigureAwait(false))
+                {
+                    if (await reader.ReadAsync().ConfigureAwait(false))
+                    {
+                        var readResult = await MessageRow.Read(reader).ConfigureAwait(false);
+                        receivedSeq = readResult.RawData.Seq;
+                        return readResult;
+                    }
+                }
+            }
+
+            //No free slot, table might be empty or we are approaching end of buffer and need to start from beginning
+            var nextSequence = await GetNextSequence(connection, transaction, true).ConfigureAwait(false);
+            if (nextSequence.HasValue)
+            {
+                receivedSeq = nextSequence.Value - 1;
+                var result = await TryReceive(connection, transaction).ConfigureAwait(false);
+                return result;
+            }
+            else
+            {
+                return MessageReadResult.NoMessage;
+            }
+        }
+
+        async Task<int?> GetNextSequence(SqlConnection connection, SqlTransaction transaction, bool hasMessage)
+        {
+            using (var command = new SqlCommand($@"
+SELECT Min(Seq)
+FROM {qualifiedTableName}
+WHERE HasMessage = @hasMessage", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@hasMessage", hasMessage);
+                var result = await command.ExecuteScalarAsync().ConfigureAwait(false);
+                if (DBNull.Value == result)
+                {
+                    return null;
+                }
+                return (int)result;
             }
         }
 
@@ -53,27 +77,11 @@ namespace NServiceBus.Transport.SQLServer
             return SendRawMessage(poisonMessage, connection, transaction);
         }
 
-        public Task Send(Dictionary<string, string> headers, byte[] body, SqlConnection connection, SqlTransaction transaction)
+        public Task Send(string messageId, Dictionary<string, string> headers, byte[] body, SqlConnection connection, SqlTransaction transaction)
         {
-            var messageRow = MessageRow.From(headers, body);
+            var messageRow = MessageRow.From(messageId, headers, body, sentSeq);
 
             return SendRawMessage(messageRow, connection, transaction);
-        }
-
-        static async Task<MessageReadResult> ReadMessage(SqlCommand command)
-        {
-            // We need sequential access to not buffer everything into memory
-            using (var dataReader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow | CommandBehavior.SequentialAccess).ConfigureAwait(false))
-            {
-                if (!await dataReader.ReadAsync().ConfigureAwait(false))
-                {
-                    return MessageReadResult.NoMessage;
-                }
-
-                var readResult = await MessageRow.Read(dataReader).ConfigureAwait(false);
-
-                return readResult;
-            }
         }
 
         async Task SendRawMessage(MessageRow message, SqlConnection connection, SqlTransaction transaction)
@@ -84,7 +92,31 @@ namespace NServiceBus.Transport.SQLServer
                 {
                     message.PrepareSendCommand(command);
 
-                    await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+                    using (var reader = await command.ExecuteReaderAsync().ConfigureAwait(false))
+                    {
+                        if (await reader.ReadAsync().ConfigureAwait(false))
+                        {
+                            queueFullHandling.OnQueueNonFull();
+                            var result = reader.GetInt32(0);
+                            sentSeq = result;
+                            return;
+                        }
+                    }
+                }
+                //No free slot, table might be full or we are approaching end of buffer and need to start from beginning
+                var nextSequence = await GetNextSequence(connection, transaction, false).ConfigureAwait(false);
+                if (nextSequence.HasValue)
+                {
+                    //We found a free slot, let's update and retry
+                    sentSeq = nextSequence.Value - 1;
+                    message.UpdateSeq(sentSeq);
+                    await SendRawMessage(message, connection, transaction).ConfigureAwait(false);
+                }
+                else
+                {
+                    //No free slot, let's apply queue full handling strategy and (possibly) retry.
+                    await queueFullHandling.HandleQueueFull().ConfigureAwait(false);
+                    await SendRawMessage(message, connection, transaction).ConfigureAwait(false);
                 }
             }
             catch (SqlException ex)
@@ -120,40 +152,19 @@ namespace NServiceBus.Transport.SQLServer
             }
         }
 
-        public async Task<int> PurgeBatchOfExpiredMessages(SqlConnection connection, int purgeBatchSize)
-        {
-            using (var command = new SqlCommand(purgeExpiredCommand, connection))
-            {
-                command.Parameters.AddWithValue("@BatchSize", purgeBatchSize);
-                return await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-            }
-        }
-
-        public async Task LogWarningWhenIndexIsMissing(SqlConnection connection)
-        {
-            using (var command = new SqlCommand(checkIndexCommand, connection))
-            {
-                var rowsCount = (int) await command.ExecuteScalarAsync().ConfigureAwait(false);
-
-                if (rowsCount == 0)
-                {
-                    Logger.Warn($@"Table {qualifiedTableName} does not contain index 'Index_Expires'.{Environment.NewLine}Adding this index will speed up the process of purging expired messages from the queue. Please consult the documentation for further information.");
-                }
-            }
-        }
-
         public override string ToString()
         {
             return qualifiedTableName;
         }
 
+        int receivedSeq;
+        int sentSeq;
+
         static ILog Logger = LogManager.GetLogger(typeof(TableBasedQueue));
         string qualifiedTableName;
-        string peekCommand;
+        readonly IQueueFullHandling queueFullHandling;
         string receiveCommand;
         string sendCommand;
         string purgeCommand;
-        string purgeExpiredCommand;
-        string checkIndexCommand;
     }
 }

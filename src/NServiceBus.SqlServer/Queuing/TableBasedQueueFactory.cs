@@ -1,16 +1,28 @@
 namespace NServiceBus.Transport.SQLServer
 {
     using System;
-    using System.Collections.Concurrent;
+    using System.Collections.Generic;
 
     class TableBasedQueueFactory
     {
+        public TableBasedQueueFactory(IQueueFullHandling queueFullHandling)
+        {
+            this.queueFullHandling = queueFullHandling;
+        }
+
         public TableBasedQueue Get(string qualifiedTableName, string queueName)
         {
             var key = Tuple.Create(qualifiedTableName, queueName);
-            return cache.GetOrAdd(key, x => new TableBasedQueue(x.Item1, x.Item2));
+            TableBasedQueue value;
+            if (!cache.TryGetValue(key, out value))
+            {
+                value = new TableBasedQueue(qualifiedTableName, queueName, queueFullHandling);
+                cache[key] = value;
+            }
+            return value;
         } 
 
-        ConcurrentDictionary<Tuple<string, string>, TableBasedQueue> cache = new ConcurrentDictionary<Tuple<string, string>, TableBasedQueue>();
+        Dictionary<Tuple<string, string>, TableBasedQueue> cache = new Dictionary<Tuple<string, string>, TableBasedQueue>();
+        IQueueFullHandling queueFullHandling;
     }
 }
