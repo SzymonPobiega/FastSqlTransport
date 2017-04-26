@@ -8,12 +8,14 @@ namespace Demo
     using System.Diagnostics;
     using System.Threading;
     using NServiceBus;
+    using NServiceBus.Features;
     using NServiceBus.Transport.SQLServer;
 
     class Program
     {
-        public const int MessageCount = 60000;
+        public const int MessageCount = 120000;
         static int messagesSent;
+        public static TaskCompletionSource<bool> receivingComplete = new TaskCompletionSource<bool>();
 
         static void Main(string[] args)
         {
@@ -22,13 +24,15 @@ namespace Demo
 
         static async Task Start()
         {
-            Console.WriteLine("Please enter catalog name");
-            var catalog = Console.ReadLine();
+            //Console.WriteLine("Please enter catalog name");
+            //var catalog = Console.ReadLine();
+            var catalog = "nservicebus";
 
             var senderConfig = new EndpointConfiguration("Sender");
             senderConfig.SendFailedMessagesTo("error");
             senderConfig.EnableInstallers();
             senderConfig.UsePersistence<InMemoryPersistence>();
+            senderConfig.SendOnly();
 
             var transport = senderConfig.UseTransport<SqlServerTransport>();
             transport.Transactions(TransportTransactionMode.SendsAtomicWithReceive);
@@ -42,8 +46,8 @@ namespace Demo
 
             var sender = await Endpoint.Start(senderConfig);
 
-            Console.WriteLine("Press <enter> to start the benchmark");
-            Console.ReadLine();
+            //Console.WriteLine("Press <enter> to start the benchmark");
+            //Console.ReadLine();
 
             //Seed the queue
             var sendWatch = Stopwatch.StartNew();
@@ -66,6 +70,9 @@ namespace Demo
 
             //Wait for send to complete
             await sendTask;
+
+            await receivingComplete.Task.ConfigureAwait(false);
+            await receiver.Stop().ConfigureAwait(false);
             await sender.Stop();
 
             Console.WriteLine("Press <enter> to exit");
@@ -83,12 +90,15 @@ namespace Demo
             var transport = receiverConfig.UseTransport<SqlServerTransport>();
             transport.Transactions(TransportTransactionMode.SendsAtomicWithReceive);
             transport.ConnectionString(connectionString);
+            receiverConfig.LimitMessageProcessingConcurrencyTo(8);
+            receiverConfig.DisableFeature<TimeoutManager>();
+            receiverConfig.Recoverability().DisableLegacyRetriesSatellite();
             return receiverConfig;
         }
 
         static Task Send(string connectionString, IMessageSession sender)
         {
-            var tasks = Enumerable.Range(0, 12)
+            var tasks = Enumerable.Range(0, 8)
                 .Select(i => Task.Run(() => SendTask(connectionString, sender)))
                 .ToArray();
 
@@ -144,6 +154,7 @@ namespace Demo
             {
                 watch.Stop();
                 Console.WriteLine("Receiving done in {0}", watch.ElapsedMilliseconds);
+                Program.receivingComplete.SetResult(true);
             }
             return Task.FromResult(0);
         }

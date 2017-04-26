@@ -4,7 +4,6 @@
     using System.Collections.Generic;
     using System.Data;
     using System.Data.SqlClient;
-    using System.IO;
     using System.Threading.Tasks;
     using Logging;
     using static System.String;
@@ -52,8 +51,8 @@
             {
                 Seq = await dataReader.GetFieldValueAsync<int>(0).ConfigureAwait(false),
                 id = await dataReader.GetFieldValueAsync<string>(1).ConfigureAwait(false),
-                headers = await GetHeaders(dataReader, 2).ConfigureAwait(false),
-                bodyBytes = await GetBody(dataReader, 3).ConfigureAwait(false)
+                headers = await dataReader.GetFieldValueAsync<string>(2).ConfigureAwait(false),
+                bodyBytes = await dataReader.GetFieldValueAsync<byte[]>(3).ConfigureAwait(false)
             };
         }
 
@@ -61,6 +60,7 @@
         {
             try
             {
+                //var parsedHeaders = new Dictionary<string, string>();
                 var parsedHeaders = IsNullOrEmpty(headers)
                     ? new Dictionary<string, string>()
                     : DictionarySerializer.DeSerialize(headers);
@@ -71,30 +71,6 @@
             {
                 Logger.Error("Error receiving message. Probable message metadata corruption. Moving to error queue.", ex);
                 return MessageReadResult.Poison(this);
-            }
-        }
-        
-        static async Task<string> GetHeaders(SqlDataReader dataReader, int headersIndex)
-        {
-            if (await dataReader.IsDBNullAsync(headersIndex).ConfigureAwait(false))
-            {
-                return null;
-            }
-
-            using (var textReader = dataReader.GetTextReader(headersIndex))
-            {
-                return await textReader.ReadToEndAsync().ConfigureAwait(false);
-            }
-        }
-
-        static async Task<byte[]> GetBody(SqlDataReader dataReader, int bodyIndex)
-        {
-            // Null values will be returned as an empty (zero bytes) Stream.
-            using (var outStream = new MemoryStream())
-            using (var stream = dataReader.GetStream(bodyIndex))
-            {
-                await stream.CopyToAsync(outStream).ConfigureAwait(false);
-                return outStream.ToArray();
             }
         }
 

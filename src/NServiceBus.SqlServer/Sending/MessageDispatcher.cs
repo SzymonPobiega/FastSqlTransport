@@ -3,6 +3,7 @@
     using System;
     using System.Collections.Generic;
     using System.Data.SqlClient;
+    using System.Diagnostics;
     using System.Linq;
     using System.Threading.Tasks;
     using System.Transactions;
@@ -21,6 +22,7 @@
         // We need to check if we can support cancellation in here as well?
         public async Task Dispatch(TransportOperations operations, TransportTransaction transportTransaction, ContextBag context)
         {
+            var timer = Stopwatch.StartNew();
             TableBasedQueueFactory queueFactory;
             if (!transportTransaction.TryGet(out queueFactory))
             {
@@ -29,6 +31,12 @@
 
             await DeduplicateAndDispatch(operations, ops => DispatchAsIsolated(ops, queueFactory), DispatchConsistency.Isolated).ConfigureAwait(false);
             await DeduplicateAndDispatch(operations, ops => DispatchAsNonIsolated(ops, transportTransaction, queueFactory), DispatchConsistency.Default).ConfigureAwait(false);
+
+            timer.Stop();
+            if (timer.ElapsedMilliseconds > 50)
+            {
+                Console.Write("U");
+            }
         }
 
         Task DeduplicateAndDispatch(TransportOperations operations, Func<List<UnicastTransportOperation>, Task> dispatchMethod, DispatchConsistency dispatchConsistency)

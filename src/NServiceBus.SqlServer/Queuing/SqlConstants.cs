@@ -18,10 +18,6 @@ UPDATE {0} SET
 
         public static readonly string SendText =
             @"
-DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
-IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON'
-SET NOCOUNT ON;
-
 WITH message AS (
     SELECT TOP(1) *
     FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK)
@@ -31,15 +27,9 @@ WITH message AS (
 UPDATE message SET HasMessage = 1, Body = @body, Headers = @headers, MessageId = @id
 OUTPUT
     deleted.Seq;
-
-IF (@NOCOUNT = 'ON') SET NOCOUNT ON;
-IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
+";
 
         public static readonly string ReceiveText = @"
-DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
-IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
-SET NOCOUNT ON;
-
 WITH message AS (
     SELECT TOP(1) *
     FROM {0} WITH (UPDLOCK, READPAST, ROWLOCK)
@@ -52,9 +42,7 @@ OUTPUT
 	deleted.MessageId,
     deleted.Headers,
     deleted.Body;
-
-IF (@NOCOUNT = 'ON') SET NOCOUNT ON;
-IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
+";
 
         public static readonly string CreateQueueText = @"
 IF EXISTS (
@@ -77,17 +65,14 @@ BEGIN
 END
 
 CREATE TABLE {0} (
-    Seq int NOT NULL,
+    Seq int NOT NULL PRIMARY KEY,
     HasMessage bit NOT NULL,
     MessageId varchar(200) NULL,
     Headers varchar(max) NULL,
-    Body varbinary(max) NULL,
+    Body varbinary(max) NULL
 ) ON [PRIMARY];
 
-CREATE CLUSTERED INDEX Index_Seq ON {0}
-(
-    Seq ASC
-) ON [PRIMARY];
+EXEC sp_tableoption '{0}', 'large value types out of row', 1; 
 
 DECLARE @count int = 0;
 DECLARE @target int = 20000;

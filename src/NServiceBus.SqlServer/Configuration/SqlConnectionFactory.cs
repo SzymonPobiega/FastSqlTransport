@@ -15,7 +15,6 @@
         public async Task<SqlConnection> OpenNewConnection()
         {
             var connection = await openNewConnection().ConfigureAwait(false);
-
             ValidateConnectionPool(connection.ConnectionString);
 
             return connection;

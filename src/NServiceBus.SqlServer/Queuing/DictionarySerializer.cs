@@ -7,9 +7,10 @@
 
     static class DictionarySerializer
     {
+        static DataContractJsonSerializer serializer = BuildSerializer();
+
         public static string Serialize(Dictionary<string, string> instance)
         {
-            var serializer = BuildSerializer();
             using (var stream = new MemoryStream())
             {
                 serializer.WriteObject(stream, instance);
@@ -19,7 +20,6 @@
 
         public static Dictionary<string, string> DeSerialize(string json)
         {
-            var serializer = BuildSerializer();
             using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(json)))
             {
                 return (Dictionary<string, string>) serializer.ReadObject(stream);

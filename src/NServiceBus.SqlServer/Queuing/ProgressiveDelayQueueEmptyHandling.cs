@@ -20,6 +20,7 @@ namespace NServiceBus.Transport.SQLServer
         public Task HandleQueueEmpty(CancellationToken stopToken)
         {
             consecutiveFailures++;
+            Console.Write("e");
             return Task.Delay(CalculateDelay(), stopToken);
         }
 

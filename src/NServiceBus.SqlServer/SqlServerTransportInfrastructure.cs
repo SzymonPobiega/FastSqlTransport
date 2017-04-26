@@ -54,7 +54,7 @@ namespace NServiceBus.Transport.SQLServer
             var queuePurger = new QueuePurger(connectionFactory);
 
             return new TransportReceiveInfrastructure(
-                () => new MessagePump(receiveStrategyFactory, GetQueueFactoryFactory(), queuePurger, connectionFactory, () => new ProgressiveDelayQueueEmptyHandling(100, 5000), addressTranslator, waitTimeCircuitBreaker),
+                () => new MessagePump(receiveStrategyFactory, GetQueueFactoryFactory(), queuePurger, connectionFactory, () => new ProgressiveDelayQueueEmptyHandling(10, 100), addressTranslator, waitTimeCircuitBreaker),
                 () => new QueueCreator(connectionFactory, addressTranslator),
                 () => Task.FromResult(StartupCheckResult.Success));
         }

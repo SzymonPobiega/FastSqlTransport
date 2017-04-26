@@ -2,6 +2,7 @@
 {
     using System;
     using System.Data.SqlClient;
+    using System.Diagnostics;
     using System.Threading;
     using System.Threading.Tasks;
     using System.Transactions;
@@ -49,7 +50,6 @@
                         transaction.Commit();
                     }
                 }
-
                 failureInfoStorage.ClearFailureInfoForMessage(message.TransportId);
             }
             catch (Exception exception)

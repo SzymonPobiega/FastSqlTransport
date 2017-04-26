@@ -4,8 +4,8 @@ namespace NServiceBus.Transport.SQLServer
     using System.Collections.Generic;
     using System.Data;
     using System.Data.SqlClient;
+    using System.Diagnostics;
     using System.Threading.Tasks;
-    using Logging;
     using Unicast.Queuing;
     using static System.String;
 
@@ -49,10 +49,7 @@ namespace NServiceBus.Transport.SQLServer
                 var result = await TryReceive(connection, transaction).ConfigureAwait(false);
                 return result;
             }
-            else
-            {
-                return MessageReadResult.NoMessage;
-            }
+            return MessageReadResult.NoMessage;
         }
 
         async Task<int?> GetNextSequence(SqlConnection connection, SqlTransaction transaction, bool hasMessage)
@@ -92,7 +89,7 @@ WHERE HasMessage = @hasMessage", connection, transaction))
                 {
                     message.PrepareSendCommand(command);
 
-                    using (var reader = await command.ExecuteReaderAsync().ConfigureAwait(false))
+                    using (var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow).ConfigureAwait(false))
                     {
                         if (await reader.ReadAsync().ConfigureAwait(false))
                         {
@@ -160,7 +157,6 @@ WHERE HasMessage = @hasMessage", connection, transaction))
         int receivedSeq;
         int sentSeq;
 
-        static ILog Logger = LogManager.GetLogger(typeof(TableBasedQueue));
         string qualifiedTableName;
         readonly IQueueFullHandling queueFullHandling;
         string receiveCommand;
